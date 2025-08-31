@@ -1,12 +1,13 @@
 from flask import Flask, request, jsonify
 import random
+import os
 
 app = Flask(__name__)
 
+# Dummy prediction function (replace with real ML later)
 def predict_next(last_positions):
-    # Simple prediction, replace later with real ML
-    board_size = 25
-    predictions = [{"position": i, "probability": random.random()} for i in range(1, board_size+1)]
+    board_size = 25  # adjust for your Mine game
+    predictions = [{"position": i, "probability": random.random()} for i in range(1, board_size + 1)]
     total = sum(p["probability"] for p in predictions)
     for p in predictions:
         p["probability"] /= total
@@ -21,8 +22,12 @@ def predict():
 @app.route("/train", methods=["POST"])
 def train():
     data = request.get_json()
-    print(f"Training ML: {data}")
+    user_id = data.get("user_id")
+    boom_position = data.get("boom_position")
+    # Here you can train your ML model
+    print(f"Training ML with user {user_id}, boom_position {boom_position}")
     return jsonify({"status": "success"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))  # Use Render’s port
+    app.run(host="0.0.0.0", port=port)
