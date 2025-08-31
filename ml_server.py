@@ -1,29 +1,52 @@
 import os
+import threading
+import time
+import requests
 from flask import Flask, request, jsonify
-import random
 
+# Initialize Flask
 app = Flask(__name__)
 
-def predict_next(last_positions):
-    board_size = 25
-    predictions = [{"position": i, "probability": random.random()} for i in range(1, board_size+1)]
-    total = sum(p["probability"] for p in predictions)
-    for p in predictions:
-        p["probability"] /= total
-    return predictions
+# Environment variables
+ML_SERVER_URL = os.getenv("ML_SERVER_URL")  # Your Render public URL
+
+if not ML_SERVER_URL:
+    print("❌ Warning: ML_SERVER_URL not set in .env, self-ping disabled")
+
+# Dummy prediction function (replace with your ML logic)
+def predict(data):
+    # Example: just returns data for now
+    return {"prediction": "example", "input": data}
+
+# Flask routes
+@app.route("/")
+def home():
+    return "ML Server is alive! 🚀"
 
 @app.route("/predict", methods=["POST"])
-def predict():
-    data = request.get_json()
-    last_positions = data.get("last_positions", [])
-    return jsonify({"predictions": predict_next(last_positions)})
+def handle_predict():
+    try:
+        data = request.json
+        result = predict(data)
+        return jsonify({"status": "success", "result": result})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/train", methods=["POST"])
-def train():
-    data = request.get_json()
-    print(f"Training ML with: {data}")
-    return jsonify({"status": "success"})
+# Self-ping to stay awake on Render free tier
+def self_ping():
+    while True:
+        if ML_SERVER_URL:
+            try:
+                print("🔔 Self-ping to keep server awake...")
+                requests.get(ML_SERVER_URL)
+            except Exception as e:
+                print("❌ Self-ping failed:", e)
+        time.sleep(10 * 60)  # Ping every 10 minutes
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # Start self-ping thread
+    ping_thread = threading.Thread(target=self_ping, daemon=True)
+    ping_thread.start()
+
+    # Run Flask app
+    app.run(host="0.0.0.0", port=10000)
