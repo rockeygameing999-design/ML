@@ -1,126 +1,137 @@
-import os
-import threading
-import time
-import json
 from flask import Flask, request, jsonify
-
-# Optional: requests for self-ping
-try:
-    import requests
-except ImportError:
-    os.system("pip install requests")
-    import requests
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.ensemble import VotingClassifier
+from sklearn.model_selection import GridSearchCV, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
+import numpy as np
+import pickle
+import os
 
 app = Flask(__name__)
 
-# Config from environment
-ML_SERVER_URL = os.getenv("ML_SERVER_URL")  # Your Render URL
-PING_INTERVAL = 10 * 60  # 10 minutes
-
-# In-memory storage of submissions
+# In-memory storage (replace with MongoDB or Redis for production)
 MODEL_DATA = []
+MODEL = None
+SCALER = StandardScaler()
 
-# --------------------
-# ML Utilities
-# --------------------
-def weighted_prediction(submissions):
-    """
-    Compute a simple weighted prediction of bomb positions based on submissions.
-    Each submission has a weight (0-1) and contributes to the final prediction.
-    """
-    if not submissions:
-        return "No data yet"
+# Save/load model
+MODEL_FILE = 'model.pkl'
+def save_model(model):
+    with open(MODEL_FILE, 'wb') as f:
+        pickle.dump(model, f)
 
-    # For simplicity, assume we predict next bomb position 0-100
-    weighted_counts = [0] * 101  # positions 0-100
-    total_weight = 0
+def load_model():
+    if os.path.exists(MODEL_FILE):
+        with open(MODEL_FILE, 'rb') as f:
+            return pickle.load(f)
+    return None
 
-    for sub in submissions:
-        outcome = sub.get("outcome")
-        weight = sub.get("weight", 1)
-        if isinstance(outcome, int) and 0 <= outcome <= 100:
-            weighted_counts[outcome] += weight
-            total_weight += weight
-
-    if total_weight == 0:
-        return "Insufficient weighted data"
-
-    # Return position with highest weighted count
-    prediction = weighted_counts.index(max(weighted_counts))
-    return prediction
-
-def train_model(submission):
-    """Add submission to MODEL_DATA with weight"""
-    MODEL_DATA.append(submission)
-    print(f"New submission added: {submission}")
-
-# --------------------
-# Flask Routes
-# --------------------
-@app.route("/")
-def home():
-    return jsonify({"status": "ML server running", "submissions": len(MODEL_DATA)}), 200
-
-@app.route("/predict", methods=["POST"])
-def predict_route():
-    data = request.json
-    submissions = data.get("submissions")  # list of submissions with weights
-    if not submissions:
-        return jsonify({"error": "No submissions provided"}), 400
-
-    prediction = weighted_prediction(submissions)
-    return jsonify({"prediction": prediction})
-
-@app.route("/submit", methods=["POST"])
-def submit_route():
-    """
-    Accepts a single submission for training:
-    {seed, position, outcome, weight(optional)}
-    """
-    data = request.json
-    seed = data.get("seed")
-    position = data.get("position")
-    outcome = data.get("outcome")
-    weight = data.get("weight", 1)
-
-    if seed is None or position is None or outcome is None:
-        return jsonify({"error": "Missing seed, position, or outcome"}), 400
-
-    submission = {"seed": seed, "position": position, "outcome": outcome, "weight": weight}
-    train_model(submission)
-    return jsonify({"status": "success", "submission": submission}), 200
-
-# --------------------
-# Self-Ping to Stay Awake
-# --------------------
-def self_ping():
-    """
-    Periodically ping the ML server to keep it awake.
-    Uses exponential backoff if ping fails.
-    """
-    if not ML_SERVER_URL:
-        print("ML_SERVER_URL not set, self-ping disabled")
+# Train model with hyperparameter tuning and ensemble
+def train_model():
+    global MODEL
+    if not MODEL_DATA:
         return
 
-    interval = PING_INTERVAL
-    while True:
-        try:
-            r = requests.get(ML_SERVER_URL)
-            print(f"Self-ping status: {r.status_code}")
-            interval = PING_INTERVAL  # reset interval on success
-        except Exception as e:
-            print(f"Self-ping failed: {e}")
-            # Backoff: double interval up to 1 hour
-            interval = min(interval * 2, 3600)
-        time.sleep(interval)
+    # Extract features and labels
+    X = []
+    y = []
+    for data in MODEL_DATA:
+        features = [
+            data['nonce'],
+            data['totalMines'],
+            data['features']['hashEntropy'],
+            data['features']['nonceCategory'],
+            data['features']['positionDensity']
+        ]
+        X.append(features)
+        y.append(1 if data['outcome'] == 'win' else 0)  # Binary classification
 
-# --------------------
-# Main
-# --------------------
-if __name__ == "__main__":
-    # Start self-ping thread
-    if ML_SERVER_URL:
-        threading.Thread(target=self_ping, daemon=True).start()
+    if not X:
+        return
 
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    X = np.array(X)
+    y = np.array(y)
+
+    # Normalize features
+    X_scaled = SCALER.fit_transform(X)
+
+    # Handle imbalanced data with SMOTE
+    smote = SMOTE(random_state=42)
+    try:
+        X_res, y_res = smote.fit_resample(X_scaled, y)
+    except ValueError:
+        X_res, y_res = X_scaled, y  # Fallback if SMOTE fails
+
+    # Ensemble model
+    rf = RandomForestClassifier(random_state=42)
+    xgb = XGBClassifier(random_state=42)
+    ensemble = VotingClassifier(estimators=[('rf', rf), ('xgb', xgb)], voting='soft')
+
+    # Hyperparameter tuning
+    param_grid = {
+        'rf__n_estimators': [50, 100],
+        'rf__max_depth': [5, 10],
+        'xgb__n_estimators': [50, 100],
+        'xgb__max_depth': [3, 5]
+    }
+    grid_search = GridSearchCV(ensemble, param_grid, cv=5, scoring='accuracy')
+    grid_search.fit(X_res, y_res)
+
+    MODEL = grid_search.best_estimator_
+    save_model(MODEL)
+
+    # Evaluate with cross-validation
+    scores = cross_val_score(MODEL, X_res, y_res, cv=5)
+    print(f"Cross-validation accuracy: {scores.mean():.2f} (+/- {scores.std() * 2:.2f})")
+
+# Predict function
+def weighted_prediction(data):
+    if not MODEL:
+        return [0] * data['totalMines']  # Default if no model
+
+    features = [
+        data['nonce'],
+        data['totalMines'],
+        data['features']['hashEntropy'],
+        data['features']['nonceCategory'],
+        data['features']['positionDensity']
+    ]
+    X = SCALER.transform([features])
+    prob = MODEL.predict_proba(X)[0][1]  # Probability of 'win'
+
+    # Generate bomb positions based on probability
+    num_positions = data['totalMines']
+    positions = []
+    seen = set()
+    seed = data['nonce']
+    while len(positions) < num_positions:
+        seed = hash(str(seed)) % 1000000
+        pos = seed % 25
+        if pos not in seen:
+            seen.add(pos)
+            positions.append(pos)
+    return sorted(positions)
+
+@app.route('/submit', methods=['POST'])
+def submit():
+    data = request.json
+    MODEL_DATA.append(data)
+    train_model()  # Retrain with new data
+    return jsonify({'status': 'success'})
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    data = request.json['submissions'][0]
+    prediction = weighted_prediction(data)
+    return jsonify({'prediction': prediction})
+
+@app.route('/ping', methods=['GET'])
+def ping():
+    return jsonify({'status': 'ok'})
+
+if __name__ == '__main__':
+    MODEL = load_model()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
