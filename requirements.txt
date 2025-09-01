@@ -5,3 +5,4 @@ imbalanced-learn==0.12.4
 numpy==2.1.1
 joblib==1.4.2
 scipy==1.14.1
+pymongo>=4.6.0
