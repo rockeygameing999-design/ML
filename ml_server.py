@@ -3,18 +3,7 @@ import numpy as np
 import pickle
 import os
 import logging
-
-# Try importing ML dependencies
-try:
-    from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-    from sklearn.model_selection import GridSearchCV, cross_val_score
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import accuracy_score
-    from xgboost import XGBClassifier
-    from imblearn.over_sampling import SMOTE
-except ImportError as e:
-    print(f"ImportError: {e}. Ensure requirements.txt includes scikit-learn, xgboost, imblearn, numpy.")
-    raise
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,7 +14,22 @@ app = Flask(__name__)
 # In-memory storage (replace with MongoDB for production)
 MODEL_DATA = []
 MODEL = None
-SCALER = StandardScaler()
+SCALER = None
+USE_ML = True  # Flag to use ML if libraries load
+
+# Try importing ML dependencies with fallback
+try:
+    from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+    from sklearn.model_selection import GridSearchCV, cross_val_score
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import accuracy_score
+    from xgboost import XGBClassifier
+    from imblearn.over_sampling import SMOTE
+    SCALER = StandardScaler()
+    logger.info("ML libraries loaded successfully")
+except ImportError as e:
+    logger.warning(f"ML libraries not available: {e}. Falling back to simple prediction. Install with: pip install scikit-learn xgboost imbalanced-learn numpy")
+    USE_ML = False
 
 # Save/load model
 MODEL_FILE = 'model.pkl'
@@ -49,11 +53,11 @@ def load_model():
         logger.error(f"Failed to load model: {e}")
         return None
 
-# Train model with hyperparameter tuning and ensemble
+# Train model with hyperparameter tuning and ensemble (only if USE_ML)
 def train_model():
     global MODEL
-    if not MODEL_DATA:
-        logger.warning("No data available for training")
+    if not USE_ML or not MODEL_DATA:
+        logger.warning("No ML libraries or data available for training")
         return
 
     # Extract features and labels
@@ -63,9 +67,9 @@ def train_model():
         features = [
             data['nonce'],
             data['totalMines'],
-            data['features']['hashEntropy'],
-            data['features']['nonceCategory'],
-            data['features']['positionDensity']
+            data.get('features', {}).get('hashEntropy', 0),
+            data.get('features', {}).get('nonceCategory', 0),
+            data.get('features', {}).get('positionDensity', 0)
         ]
         X.append(features)
         y.append(1 if data['outcome'] == 'win' else 0)  # Binary classification
@@ -116,27 +120,27 @@ def train_model():
     except Exception as e:
         logger.error(f"Model training failed: {e}")
 
-# Predict function
+# Predict function (ML if available, else simple weighted)
 def weighted_prediction(data):
-    if not MODEL:
-        logger.warning("No trained model available, returning default prediction")
-        return [0] * data['totalMines']
+    if USE_ML and MODEL:
+        features = [
+            data['nonce'],
+            data['totalMines'],
+            data.get('features', {}).get('hashEntropy', 0),
+            data.get('features', {}).get('nonceCategory', 0),
+            data.get('features', {}).get('positionDensity', 0)
+        ]
+        try:
+            X = SCALER.transform([features])
+            prob = MODEL.predict_proba(X)[0][1]  # Probability of 'win'
+            logger.info(f"ML prediction probability: {prob}")
+        except Exception as e:
+            logger.error(f"ML prediction failed: {e}")
+            prob = 0.5  # Fallback
+    else:
+        prob = 0.5  # Simple fallback
 
-    features = [
-        data['nonce'],
-        data['totalMines'],
-        data['features']['hashEntropy'],
-        data['features']['nonceCategory'],
-        data['features']['positionDensity']
-    ]
-    try:
-        X = SCALER.transform([features])
-        prob = MODEL.predict_proba(X)[0][1]  # Probability of 'win'
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        return [0] * data['totalMines']
-
-    # Generate bomb positions based on probability
+    # Generate bomb positions based on probability and data
     num_positions = data['totalMines']
     positions = []
     seen = set()
@@ -147,6 +151,7 @@ def weighted_prediction(data):
         if pos not in seen:
             seen.add(pos)
             positions.append(pos)
+    logger.info(f"Generated positions: {positions}")
     return sorted(positions)
 
 @app.route('/submit', methods=['POST'])
@@ -154,7 +159,7 @@ def submit():
     try:
         data = request.json
         MODEL_DATA.append(data)
-        train_model()
+        train_model()  # Retrain with new data
         logger.info("Submission processed successfully")
         return jsonify({'status': 'success'})
     except Exception as e:
