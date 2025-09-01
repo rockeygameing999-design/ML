@@ -24,7 +24,7 @@ try:
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score
     from xgboost import XGBClassifier
-    from imbalanced_learn.over_sampling import SMOTE
+    from imblearn.over_sampling import SMOTE
     SCALER = StandardScaler()
     logger.info("ML libraries loaded successfully")
 except ImportError as e:
@@ -65,14 +65,14 @@ def train_model():
     y = []
     for data in MODEL_DATA:
         features = [
-            data['nonce'],
-            data['totalMines'],
+            data.get('nonce', 0),
+            data.get('totalMines', 5),
             data.get('features', {}).get('hashEntropy', 0),
             data.get('features', {}).get('nonceCategory', 0),
-            data.get('features', 'positionDensity', 0),
+            data.get('features', {}).get('positionDensity', 0)
         ]
         X.append(features)
-        y.append(1 if data['outcome'] == 'win' else 0)  # Binary classification
+        y.append(1 if data.get('outcome') == 'win' else 0)  # Binary classification
 
     if not X:
         logger.warning("No valid features extracted")
@@ -123,9 +123,13 @@ def train_model():
 # Predict function (ML if available, else simple weighted)
 def weighted_prediction(data):
     total_mines = data.get('totalMines', 5)  # Default to 5 if missing
+    if not isinstance(total_mines, int) or total_mines < 1 or total_mines > 24:
+        logger.error(f"Invalid totalMines: {total_mines}")
+        return [0] * 5  # Fallback to default prediction
+
     if USE_ML and MODEL:
         features = [
-            data['nonce'],
+            data.get('nonce', 0),
             total_mines,
             data.get('features', {}).get('hashEntropy', 0),
             data.get('features', {}).get('nonceCategory', 0),
@@ -145,7 +149,7 @@ def weighted_prediction(data):
     num_positions = total_mines
     positions = []
     seen = set()
-    seed = data['nonce']
+    seed = data.get('nonce', 0)
     while len(positions) < num_positions:
         seed = hash(str(seed)) % 1000000
         pos = seed % 25
@@ -159,6 +163,9 @@ def weighted_prediction(data):
 def submit():
     try:
         data = request.json
+        if not isinstance(data, dict):
+            logger.error("Invalid submission: JSON must be an object")
+            return jsonify({'error': 'Invalid submission: JSON must be an object'}), 400
         MODEL_DATA.append(data)
         train_model()  # Retrain with new data
         logger.info("Submission processed successfully")
@@ -170,7 +177,19 @@ def submit():
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
+        if not request.json or 'submissions' not in request.json or not isinstance(request.json['submissions'], list) or not request.json['submissions']:
+            logger.error("Invalid request: Missing or invalid 'submissions' array")
+            return jsonify({'error': "Invalid request: Missing or invalid 'submissions' array"}), 400
         data = request.json['submissions'][0]
+        if not isinstance(data, dict):
+            logger.error("Invalid submission: First submission must be an object")
+            return jsonify({'error': "Invalid submission: First submission must be an object"}), 400
+        if 'totalMines' not in data or not isinstance(data['totalMines'], int):
+            logger.error("Invalid or missing totalMines")
+            return jsonify({'error': "Invalid or missing totalMines"}), 400
+        if 'nonce' not in data or not isinstance(data['nonce'], int):
+            logger.error("Invalid or missing nonce")
+            return jsonify({'error': "Invalid or missing nonce"}), 400
         prediction = weighted_prediction(data)
         logger.info(f"Prediction generated: {prediction}")
         return jsonify({'prediction': prediction})
