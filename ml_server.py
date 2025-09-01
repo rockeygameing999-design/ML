@@ -24,7 +24,7 @@ try:
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score
     from xgboost import XGBClassifier
-    from imblearn.over_sampling import SMOTE
+    from imbalanced_learn.over_sampling import SMOTE
     SCALER = StandardScaler()
     logger.info("ML libraries loaded successfully")
 except ImportError as e:
@@ -69,7 +69,7 @@ def train_model():
             data['totalMines'],
             data.get('features', {}).get('hashEntropy', 0),
             data.get('features', {}).get('nonceCategory', 0),
-            data.get('features', {}).get('positionDensity', 0)
+            data.get('features', 'positionDensity', 0),
         ]
         X.append(features)
         y.append(1 if data['outcome'] == 'win' else 0)  # Binary classification
@@ -122,10 +122,11 @@ def train_model():
 
 # Predict function (ML if available, else simple weighted)
 def weighted_prediction(data):
+    total_mines = data.get('totalMines', 5)  # Default to 5 if missing
     if USE_ML and MODEL:
         features = [
             data['nonce'],
-            data['totalMines'],
+            total_mines,
             data.get('features', {}).get('hashEntropy', 0),
             data.get('features', {}).get('nonceCategory', 0),
             data.get('features', {}).get('positionDensity', 0)
@@ -141,7 +142,7 @@ def weighted_prediction(data):
         prob = 0.5  # Simple fallback
 
     # Generate bomb positions based on probability and data
-    num_positions = data['totalMines']
+    num_positions = total_mines
     positions = []
     seen = set()
     seed = data['nonce']
